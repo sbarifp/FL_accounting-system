@@ -1,0 +1,4 @@
+# Ignore secret config
+secret.toml
+secret/*.toml
+**/secret.toml
