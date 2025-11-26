@@ -199,10 +199,16 @@ def is_year_closed(session, year: int) -> bool:
     )
     return status is not None
 
+def format_rupiah(value):
+    """Format angka menjadi format Rupiah"""
+    if value == 0:
+        return "Rp 0"
+    return f"Rp {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def compute_trial_balance(session, year: int):
     """
     Neraca saldo sebelum penyesuaian, hanya jurnal umum (is_adjustment=False).
+    Hanya tampilkan akun yang memiliki nominal.
     """
     accounts = (
         session.query(Account)
@@ -238,24 +244,26 @@ def compute_trial_balance(session, year: int):
         debit_sum = float(debit_sum or 0)
         credit_sum = float(credit_sum or 0)
 
-        if debit_sum >= credit_sum:
-            debit = debit_sum - credit_sum
-            credit = 0.0
-        else:
-            debit = 0.0
-            credit = credit_sum - debit_sum
+        # Hanya tambahkan akun jika ada transaksi (debit_sum > 0 atau credit_sum > 0)
+        if debit_sum > 0 or credit_sum > 0:
+            if debit_sum >= credit_sum:
+                debit = debit_sum - credit_sum
+                credit = 0.0
+            else:
+                debit = 0.0
+                credit = credit_sum - debit_sum
 
-        total_debit += debit
-        total_credit += credit
+            total_debit += debit
+            total_credit += credit
 
-        rows.append(
-            {
-                "Kode Akun": acc.code,
-                "Nama Akun": acc.name,
-                "Debit": debit,
-                "Kredit": credit,
-            }
-        )
+            rows.append(
+                {
+                    "Kode Akun": acc.code,
+                    "Nama Akun": acc.name,
+                    "Debit": format_rupiah(debit),
+                    "Kredit": format_rupiah(credit),
+                }
+            )
 
     return rows, total_debit, total_credit
 
@@ -263,8 +271,7 @@ def compute_trial_balance(session, year: int):
 def build_adjusted_trial_balance(session, year: int):
     """
     Neraca saldo setelah penyesuaian:
-    - Saldo awal dari jurnal umum (is_adjustment=False)
-    - Ditambah pengaruh jurnal penyesuaian (is_adjustment=True)
+    - Hanya tampilkan akun yang memiliki nominal
     """
     accounts = (
         session.query(Account)
@@ -320,24 +327,26 @@ def build_adjusted_trial_balance(session, year: int):
 
         saldo_akhir = saldo_awal + float(debit_adj or 0) - float(credit_adj or 0)
 
-        if saldo_akhir >= 0:
-            debit = saldo_akhir
-            credit = 0.0
-        else:
-            debit = 0.0
-            credit = abs(saldo_akhir)
+        # Hanya tampilkan akun yang memiliki saldo (tidak nol)
+        if abs(saldo_akhir) > 0.001:
+            if saldo_akhir >= 0:
+                debit = saldo_akhir
+                credit = 0.0
+            else:
+                debit = 0.0
+                credit = abs(saldo_akhir)
 
-        total_debit += debit
-        total_credit += credit
+            total_debit += debit
+            total_credit += credit
 
-        rows.append(
-            {
-                "Kode Akun": acc.code,
-                "Nama Akun": acc.name,
-                "Debit": debit,
-                "Kredit": credit,
-            }
-        )
+            rows.append(
+                {
+                    "Kode Akun": acc.code,
+                    "Nama Akun": acc.name,
+                    "Debit": format_rupiah(debit),
+                    "Kredit": format_rupiah(credit),
+                }
+            )
 
     return rows, total_debit, total_credit
 
@@ -345,9 +354,9 @@ def build_adjusted_trial_balance(session, year: int):
 def get_income_statement_data(session, year: int):
     """
     Laporan laba rugi:
-    - total pendapatan
-    - total beban
-    - laba bersih
+    - total pendapatan (positif)
+    - total beban (positif)
+    - laba bersih = pendapatan - beban
     """
     revenue_accounts = session.query(Account).filter(Account.account_type == "revenue").all()
     expense_accounts = session.query(Account).filter(Account.account_type == "expense").all()
@@ -370,7 +379,17 @@ def get_income_statement_data(session, year: int):
             credit = lines.filter(JournalLine.is_debit == False).with_entities(
                 func.coalesce(func.sum(JournalLine.amount), 0)
             ).scalar()  # noqa: E712
-            total += float(credit or 0) - float(debit or 0)
+
+            # Untuk akun pendapatan: normal balance di kredit
+            # Untuk akun beban: normal balance di debit
+            if acc.account_type == "revenue":
+                # Pendapatan = kredit - debit (hasil positif)
+                balance = float(credit or 0) - float(debit or 0)
+            else:  # expense
+                # Beban = debit - kredit (hasil positif)
+                balance = float(debit or 0) - float(credit or 0)
+            
+            total += balance
         return total
 
     total_revenue = calc_total(revenue_accounts)
@@ -449,6 +468,7 @@ def login_page():
             st.error("Email atau password salah")
 
 
+
 def page_dashboard():
     st.header("Dashboard")
     year = st.number_input("Tahun", min_value=2000, max_value=2100, value=current_year(), step=1)
@@ -458,19 +478,48 @@ def page_dashboard():
         total_asset, total_liab, total_equity = get_balance_sheet_data(session, year)
         closed = is_year_closed(session, year)
 
+    # Format angka dengan pemisah ribuan
+    def format_currency(value):
+        return f"Rp {value:,.2f}"
+
     col1, col2, col3 = st.columns(3)
-    col1.metric("Total Pendapatan", f"{total_rev:,.2f}")
-    col2.metric("Total Beban", f"{total_exp:,.2f}")
-    col3.metric("Laba Bersih", f"{net_income:,.2f}")
+    col1.metric("Total Pendapatan", format_currency(total_rev))
+    col2.metric("Total Beban", format_currency(total_exp))
+    
+    # Tampilkan laba/rugi dengan warna yang sesuai
+    if net_income >= 0:
+        col3.metric("Laba Bersih", format_currency(net_income), delta="Laba")
+    else:
+        col3.metric("Rugi Bersih", format_currency(abs(net_income)), delta_color="inverse", delta="Rugi")
+
+    st.markdown("---")
+    
+    # Informasi detail laba/rugi
+    st.subheader("Detail Laba/Rugi")
+    st.write(f"**Pendapatan:** {format_currency(total_rev)}")
+    st.write(f"**Beban:** {format_currency(total_exp)}")
+    st.write(f"**{'Laba' if net_income >= 0 else 'Rugi'} Bersih:** {format_currency(abs(net_income))}")
 
     st.markdown("---")
     c1, c2, c3 = st.columns(3)
-    c1.metric("Total Aset", f"{total_asset:,.2f}")
-    c2.metric("Total Liabilitas", f"{total_liab:,.2f}")
-    c3.metric("Total Ekuitas", f"{total_equity:,.2f}")
+    c1.metric("Total Aset", format_currency(total_asset))
+    c2.metric("Total Liabilitas", format_currency(total_liab))
+    c3.metric("Total Ekuitas", format_currency(total_equity))
 
     st.markdown("---")
-    st.write(f"Status tahun {year}: {'Proses penyesuaian' if closed else 'Belum proses penyesuaian'}")
+    
+    # Rasio keuangan sederhana
+    st.subheader("Rasio Keuangan")
+    if total_rev > 0:
+        profit_margin = (net_income / total_rev) * 100
+        st.write(f"**Profit Margin:** {profit_margin:.2f}%")
+    
+    if total_asset > 0:
+        debt_ratio = (total_liab / total_asset) * 100
+        st.write(f"**Debt Ratio:** {debt_ratio:.2f}%")
+
+    st.markdown("---")
+    st.write(f"**Status tahun {year}:** {'Proses penyesuaian' if closed else '🔓 Belum proses penyesuaian'}")
 
 
 def page_journal(is_adjustment: bool = False):
@@ -510,13 +559,12 @@ def page_journal(is_adjustment: bool = False):
 
                 table_rows.append(
                     {
-                        "ID": e.id,
-                        "Tanggal": e.date,
+                        "Tanggal": e.date.strftime("%d-%m-%Y"),
                         "No": e.number,
                         "Keterangan": e.description,
                         "Akun": f"{line.account.code} {line.account.name}",
-                        "Debit": amt if line.is_debit else 0.0,
-                        "Kredit": amt if not line.is_debit else 0.0,
+                        "Debit": format_rupiah(amt) if line.is_debit else "",
+                        "Kredit": format_rupiah(amt) if not line.is_debit else "",
                     }
                 )
 
@@ -530,22 +578,28 @@ def page_journal(is_adjustment: bool = False):
 
             # baris total di tabel
             total_row = {
-                "ID": "",
                 "Tanggal": "",
                 "No": "",
-                "Keterangan": "Total",
+                "Keterangan": "**Total**",
                 "Akun": "",
-                "Debit": total_debit,
-                "Kredit": total_credit,
+                "Debit": f"**{format_rupiah(total_debit)}**",
+                "Kredit": f"**{format_rupiah(total_credit)}**",
             }
             df = pd.concat([df, pd.DataFrame([total_row])], ignore_index=True)
 
-            st.dataframe(df, use_container_width=True)
+            # Tampilkan dataframe tanpa index
+            st.dataframe(df, use_container_width=True, hide_index=True)
 
             # tombol edit/delete per entry
+            st.subheader("Aksi Jurnal")
             for e in entries:
                 cols = st.columns([6, 1, 1])
-                cols[0].write(f"{e.date} | {e.number} | {e.description}")
+                cols[0].write(f"**{e.date.strftime('%d-%m-%Y')}** | **{e.number}** | {e.description}")
+                
+                # Hitung total debit/kredit untuk entry ini
+                entry_debit = sum(float(line.amount or 0) for line in e.lines if line.is_debit)
+                entry_credit = sum(float(line.amount or 0) for line in e.lines if not line.is_debit)
+                cols[0].write(f"Debit: {format_rupiah(entry_debit)} | Kredit: {format_rupiah(entry_credit)}")
 
                 if cols[1].button("Edit", key=f"edit_{key_suffix}_{e.id}"):
                     st.session_state[f"edit_entry_id_{key_suffix}"] = e.id
@@ -589,9 +643,13 @@ def page_journal(is_adjustment: bool = False):
 
                 st.write("Edit Baris Jurnal:")
                 edited_lines = []
+                
+                # Tampilkan total sementara
+                temp_debit = 0.0
+                temp_credit = 0.0
 
                 for idx, l in enumerate(lines):
-                    c1, c2, c3 = st.columns([3, 1, 2])
+                    c1, c2, c3, c4 = st.columns([3, 1, 2, 1])
                     default_label = f"{l.account.code} - {l.account.name}"
 
                     acc_label = c1.selectbox(
@@ -606,41 +664,66 @@ def page_journal(is_adjustment: bool = False):
                         key=f"edit_deb_{key_suffix}_{edit_id}_{idx}",
                     )
                     amount_line = c3.number_input(
-                        "Jumlah",
+                        "Jumlah (Rp)",
                         value=float(l.amount),
                         step=1000.0,
                         key=f"edit_amt_{key_suffix}_{edit_id}_{idx}",
                     )
+                    
+                    # Hitung total sementara
+                    if is_debit_line:
+                        temp_debit += amount_line
+                    else:
+                        temp_credit += amount_line
+                    
+                    c4.write("")  # Spacer
+                    c4.write(f"**{format_rupiah(amount_line)}**")
 
                     edited_lines.append((acc_label, is_debit_line, amount_line))
+
+                # Tampilkan total
+                st.write(f"**Total Debit: {format_rupiah(temp_debit)}**")
+                st.write(f"**Total Kredit: {format_rupiah(temp_credit)}**")
+                
+                if abs(temp_debit - temp_credit) > 0.001:
+                    st.error("❌ Total debit dan kredit harus seimbang!")
+                else:
+                    st.success("✅ Debit dan kredit balance")
 
                 saved = st.form_submit_button("Simpan Perubahan")
 
             if saved:
-                # update header
-                entry.date = new_date
-                entry.number = new_number
-                entry.description = new_desc
+                # Validasi balance
+                calc_debit = sum(amt for _, is_debit, amt in edited_lines if is_debit)
+                calc_credit = sum(amt for _, is_debit, amt in edited_lines if not is_debit)
+                
+                if abs(calc_debit - calc_credit) > 0.001:
+                    st.error("Total debit dan kredit harus seimbang!")
+                else:
+                    # update header
+                    entry.date = new_date
+                    entry.number = new_number
+                    entry.description = new_desc
 
-                # hapus line lama
-                session.query(JournalLine).filter(JournalLine.entry_id == edit_id).delete()
+                    # hapus line lama
+                    session.query(JournalLine).filter(JournalLine.entry_id == edit_id).delete()
 
-                # simpan line baru
-                for acc_label, is_debit_line, amount_line in edited_lines:
-                    acc_id = account_options[acc_label]
-                    session.add(
-                        JournalLine(
-                            entry_id=edit_id,
-                            account_id=acc_id,
-                            is_debit=is_debit_line,
-                            amount=float(amount_line),
+                    # simpan line baru
+                    for acc_label, is_debit_line, amount_line in edited_lines:
+                        acc_id = account_options[acc_label]
+                        session.add(
+                            JournalLine(
+                                entry_id=edit_id,
+                                account_id=acc_id,
+                                is_debit=is_debit_line,
+                                amount=float(amount_line),
+                            )
                         )
-                    )
 
-                session.commit()
-                st.success("Jurnal berhasil diperbarui.")
-                del st.session_state[edit_key]
-                st.rerun()
+                    session.commit()
+                    st.success("Jurnal berhasil diperbarui.")
+                    del st.session_state[edit_key]
+                    st.rerun()
 
         # ===========================
         # KONFIRMASI DELETE
@@ -651,6 +734,18 @@ def page_journal(is_adjustment: bool = False):
 
             st.markdown("---")
             st.error("Anda yakin ingin menghapus jurnal ini?")
+
+            # Tampilkan detail jurnal yang akan dihapus
+            entry_to_delete = session.query(JournalEntry).filter(JournalEntry.id == del_id).first()
+            if entry_to_delete:
+                st.write(f"**Tanggal:** {entry_to_delete.date}")
+                st.write(f"**Nomor:** {entry_to_delete.number}")
+                st.write(f"**Keterangan:** {entry_to_delete.description}")
+                
+                lines_to_delete = session.query(JournalLine).filter(JournalLine.entry_id == del_id).all()
+                for line in lines_to_delete:
+                    side = "Debit" if line.is_debit else "Kredit"
+                    st.write(f"- {line.account.code} - {line.account.name}: {side} {format_rupiah(float(line.amount))}")
 
             c1, c2 = st.columns(2)
             if c1.button("Ya, hapus", key=f"confirm_del_{key_suffix}"):
@@ -668,7 +763,7 @@ def page_journal(is_adjustment: bool = False):
 
         st.markdown("---")
 
-        # ===========================
+# ===========================
         # RULE TUTUP BUKU UNTUK INPUT BARU
         # ===========================
         if is_adjustment and not closed:
@@ -691,12 +786,15 @@ def page_journal(is_adjustment: bool = False):
 
             description = st.text_input("Keterangan", value="")
 
-            num_lines = st.number_input("Jumlah baris", min_value=1, max_value=10, value=2, step=1)
+            num_lines = st.number_input("Jumlah baris", min_value=2, max_value=10, value=2, step=1)
 
             line_inputs = []
+            temp_total_debit = 0.0
+            temp_total_credit = 0.0
+            
+            st.write("**Detail Transaksi:**")
             for i in range(int(num_lines)):
-                st.markdown(f"Baris {i + 1}")
-                c1, c2, c3 = st.columns([3, 1, 2])
+                c1, c2, c3, c4 = st.columns([3, 1, 2, 2])
                 acc_label = c1.selectbox(
                     "Akun",
                     options=["(pilih)"] + account_labels,
@@ -708,15 +806,35 @@ def page_journal(is_adjustment: bool = False):
                     key=f"debit_{key_suffix}_{i}",
                 )
                 amount_line = c3.number_input(
-                    "Jumlah",
+                    "Jumlah (Rp)",
                     min_value=0.0,
                     step=1000.0,
                     key=f"amount_{key_suffix}_{i}",
                 )
+                
+                # Hitung total sementara
+                if acc_label != "(pilih)" and amount_line > 0:
+                    if is_debit_line:
+                        temp_total_debit += amount_line
+                    else:
+                        temp_total_credit += amount_line
+                
+                # Tampilkan format Rupiah
+                amount_display = format_rupiah(amount_line) if amount_line > 0 else "-"
+                c4.write(f"**{amount_display}**")
 
                 line_inputs.append((acc_label, is_debit_line, amount_line))
 
-            submitted = st.form_submit_button("Simpan")
+            # Tampilkan total
+            st.write(f"**Total Debit: {format_rupiah(temp_total_debit)}**")
+            st.write(f"**Total Kredit: {format_rupiah(temp_total_credit)}**")
+            
+            if abs(temp_total_debit - temp_total_credit) > 0.001:
+                st.error("❌ Total debit dan kredit harus seimbang!")
+            else:
+                st.success("✅ Debit dan kredit balance")
+
+            submitted = st.form_submit_button("Simpan Jurnal")
 
         if submitted:
             if not number:
@@ -830,16 +948,16 @@ def page_ledger():
                         "Tanggal": l.entry.date.strftime("%d-%m-%Y"),
                         "Keterangan": l.entry.description,
                         "No Trans": l.entry.number,
-                        "Debit": debit,
-                        "Kredit": credit,
-                        "Saldo Debit": saldo_debit,
-                        "Saldo Kredit": saldo_kredit,
+                        "Debit": format_rupiah(debit) if debit > 0 else "",
+                        "Kredit": format_rupiah(credit) if credit > 0 else "",
+                        "Saldo Debit": format_rupiah(saldo_debit) if saldo_debit > 0 else "",
+                        "Saldo Kredit": format_rupiah(saldo_kredit) if saldo_kredit > 0 else "",
                     }
                 )
                 no += 1
 
             df = pd.DataFrame(rows)
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, use_container_width=True, hide_index=True)
 
             st.markdown("---")
 
@@ -856,14 +974,20 @@ def page_trial_balance():
         rows.append({
             "Kode Akun": "Total",
             "Nama Akun": "",
-            "Debit": total_debit,
-            "Kredit": total_credit
+            "Debit": format_rupiah(total_debit),
+            "Kredit": format_rupiah(total_credit)
         })
 
         df = pd.DataFrame(rows)
         st.dataframe(df, use_container_width=True)
+        
+        # Info balance check
+        if abs(total_debit - total_credit) < 0.001:
+            st.success("✅ Debit dan Kredit Balance")
+        else:
+            st.error("❌ Debit dan Kredit Tidak Balance")
     else:
-        st.info("Belum ada data neraca saldo.")
+        st.info("Belum ada data neraca saldo untuk tahun ini.")
 
 
 def page_adjusted_trial_balance():
@@ -877,14 +1001,20 @@ def page_adjusted_trial_balance():
         rows.append({
             "Kode Akun": "Total",
             "Nama Akun": "",
-            "Debit": total_debit,
-            "Kredit": total_credit
+            "Debit": format_rupiah(total_debit),
+            "Kredit": format_rupiah(total_credit)
         })
 
         df = pd.DataFrame(rows)
         st.dataframe(df, use_container_width=True)
+        
+        # Info balance check
+        if abs(total_debit - total_credit) < 0.001:
+            st.success("✅ Debit dan Kredit Balance")
+        else:
+            st.error("❌ Debit dan Kredit Tidak Balance")
     else:
-        st.info("Belum ada data neraca saldo setelah penyesuaian.")
+        st.info("Belum ada data neraca saldo setelah penyesuaian untuk tahun ini.")
 
 
 def page_income_statement():
@@ -926,17 +1056,19 @@ def page_income_statement():
             account_balances[acc.id] = balance
 
         # =======================
-        # LAPORAN LABA RUGI
+        # LAPORAN LABA RUGI (hanya yang ada saldo)
         # =======================
         revenue_rows = []
         expense_rows = []
 
         for acc in accounts:
             bal = account_balances.get(acc.id, 0.0)
-            if acc.account_type == "revenue":
-                revenue_rows.append((acc.name, bal))
-            elif acc.account_type == "expense":
-                expense_rows.append((acc.name, bal))
+            # Hanya tampilkan jika saldo tidak nol
+            if abs(bal) > 0.001:
+                if acc.account_type == "revenue":
+                    revenue_rows.append((acc.name, bal))
+                elif acc.account_type == "expense":
+                    expense_rows.append((acc.name, bal))
 
         total_revenue = sum(x[1] for x in revenue_rows)
         total_expense = sum(x[1] for x in expense_rows)
@@ -945,35 +1077,41 @@ def page_income_statement():
         st.subheader(f"Laporan Laba Rugi")
 
         lr_rows = []
-        lr_rows.append({"Transaksi": "Pendapatan", "Nominal": ""})
-        for name, bal in revenue_rows:
-            lr_rows.append({"Transaksi": name, "Nominal": f"{bal:,.2f}"})
-        lr_rows.append({"Transaksi": "Total Pendapatan", "Nominal": f"{total_revenue:,.2f}"})
+        if revenue_rows:
+            lr_rows.append({"Transaksi": "Pendapatan", "Nominal": ""})
+            for name, bal in revenue_rows:
+                lr_rows.append({"Transaksi": name, "Nominal": format_rupiah(bal)})
+            lr_rows.append({"Transaksi": "Total Pendapatan", "Nominal": format_rupiah(total_revenue)})
 
-        lr_rows.append({"Transaksi": "Beban", "Nominal": ""})
-        for name, bal in expense_rows:
-            lr_rows.append({"Transaksi": name, "Nominal": f"{bal:,.2f}"})
-        lr_rows.append({"Transaksi": "Total Beban", "Nominal": f"{total_expense:,.2f}"})
+        if expense_rows:
+            lr_rows.append({"Transaksi": "Beban", "Nominal": ""})
+            for name, bal in expense_rows:
+                lr_rows.append({"Transaksi": name, "Nominal": format_rupiah(bal)})
+            lr_rows.append({"Transaksi": "Total Beban", "Nominal": format_rupiah(total_expense)})
 
-        lr_rows.append({"Transaksi": "Laba Bersih", "Nominal": f"{net_income:,.2f}"})
+        lr_rows.append({"Transaksi": "Laba Bersih", "Nominal": format_rupiah(net_income)})
 
-        df_lr = pd.DataFrame(lr_rows)
-        df_lr_no_index = df_lr.set_index("Transaksi")
-        st.table(df_lr_no_index)
+        if len(lr_rows) > 1:  # Jika ada data selain header
+            df_lr = pd.DataFrame(lr_rows)
+            df_lr_no_index = df_lr.set_index("Transaksi")
+            st.table(df_lr_no_index)
+        else:
+            st.info("Belum ada data laporan laba rugi untuk tahun ini.")
 
         # =======================
-        # LAPORAN PERUBAHAN MODAL
+        # LAPORAN PERUBAHAN MODAL (hanya yang ada saldo)
         # =======================
         equity_rows = []
         prive_rows = []
 
         for acc in accounts:
             bal = account_balances.get(acc.id, 0.0)
-            if acc.account_type == "equity":
-                equity_rows.append((acc.name, bal))
-            elif acc.account_type == "prive":
-                # prive normal debit, sudah ditangani di atas, biasanya positif kalau ada prive
-                prive_rows.append((acc.name, bal))
+            # Hanya tampilkan jika saldo tidak nol
+            if abs(bal) > 0.001:
+                if acc.account_type == "equity":
+                    equity_rows.append((acc.name, bal))
+                elif acc.account_type == "prive":
+                    prive_rows.append((acc.name, bal))
 
         total_equity = sum(x[1] for x in equity_rows)
         total_prive = sum(x[1] for x in prive_rows)
@@ -981,109 +1119,154 @@ def page_income_statement():
         # modal akhir = ekuitas + laba bersih - prive
         modal_akhir = total_equity + net_income - total_prive
 
-        st.markdown("")
-        st.subheader(f"Laporan Perubahan Modal")
+        if equity_rows or prive_rows:
+            st.markdown("")
+            st.subheader(f"Laporan Perubahan Modal")
 
-        lpm_rows = []
-        lpm_rows.append({"Transaksi": "Ekuitas", "Nominal": ""})
-        for name, bal in equity_rows:
-            lpm_rows.append({"Transaksi": name, "Nominal": f"{bal:,.2f}"})
-        lpm_rows.append({"Transaksi": "Total Ekuitas", "Nominal": f"{total_equity:,.2f}"})
+            lpm_rows = []
+            if equity_rows:
+                lpm_rows.append({"Transaksi": "Ekuitas", "Nominal": ""})
+                for name, bal in equity_rows:
+                    lpm_rows.append({"Transaksi": name, "Nominal": format_rupiah(bal)})
+                lpm_rows.append({"Transaksi": "Total Ekuitas", "Nominal": format_rupiah(total_equity)})
 
-        lpm_rows.append({"Transaksi": "Prive", "Nominal": ""})
-        if prive_rows:
-            for name, bal in prive_rows:
-                lpm_rows.append({"Transaksi": name, "Nominal": f"{bal:,.2f}"})
+            if prive_rows:
+                lpm_rows.append({"Transaksi": "Prive", "Nominal": ""})
+                for name, bal in prive_rows:
+                    lpm_rows.append({"Transaksi": name, "Nominal": format_rupiah(bal)})
+                lpm_rows.append({"Transaksi": "Total Prive", "Nominal": format_rupiah(total_prive)})
+
+            lpm_rows.append({"Transaksi": "Laba Bersih", "Nominal": format_rupiah(net_income)})
+            lpm_rows.append({"Transaksi": "Modal Akhir", "Nominal": format_rupiah(modal_akhir)})
+
+            df_lpm = pd.DataFrame(lpm_rows)
+            df_lpm_no_index = df_lpm.set_index("Transaksi")
+            st.table(df_lpm_no_index)
         else:
-            lpm_rows.append({"Transaksi": "Prive", "Nominal": f"{0:,.2f}"})
-        lpm_rows.append({"Transaksi": "Total Prive", "Nominal": f"{total_prive:,.2f}"})
-
-        lpm_rows.append({"Transaksi": "Modal Akhir", "Nominal": f"{modal_akhir:,.2f}"})
-
-        df_lpm = pd.DataFrame(lpm_rows)
-        df_lpm_no_index = df_lpm.set_index("Transaksi")
-        st.table(df_lpm_no_index)
+            st.info("Belum ada data laporan perubahan modal untuk tahun ini.")
 
         # =======================
-        # NERACA
+        # NERACA (hanya yang ada saldo)
         # =======================
         st.markdown("")
         st.subheader(f"Neraca")
 
-        # Kategori Aktiva
+        # Kategori Aktiva (Aset)
         aset_lancar_rows = []
         aset_tetap_rows = []
 
+        # Kategori Pasiva (Liabilitas)
+        liab_jangka_pendek_rows = []
+        liab_jangka_panjang_rows = []
+
         for acc in accounts:
-            if acc.account_type != "asset":
-                continue
-
             bal = account_balances.get(acc.id, 0.0)
+            # Hanya tampilkan jika saldo tidak nol
+            if abs(bal) > 0.001:
+                if acc.account_type == "asset":
+                    # Kategorikan aset berdasarkan kode akun
+                    try:
+                        code_int = int(acc.code)
+                    except ValueError:
+                        code_int = 0
 
-            # kategori manual khusus
-            if acc.name in ["Peralatan Outbond", "Akumulasi Penyusutan"]:
-                aset_tetap_rows.append((acc.name, bal))
-                continue
+                    if code_int < 1500:  # Asumsi: kode < 1500 = aset lancar
+                        aset_lancar_rows.append((acc.name, bal))
+                    else:
+                        aset_tetap_rows.append((acc.name, bal))
+                
+                elif acc.account_type == "liability":
+                    # Kategorikan liabilitas berdasarkan kode akun
+                    try:
+                        code_int = int(acc.code)
+                    except ValueError:
+                        code_int = 0
 
-            # kategori otomatis berdasarkan kode
-            try:
-                code_int = int(acc.code)
-            except ValueError:
-                code_int = 0
+                    if code_int < 2500:  # Asumsi: kode < 2500 = liabilitas jangka pendek
+                        liab_jangka_pendek_rows.append((acc.name, bal))
+                    else:
+                        liab_jangka_panjang_rows.append((acc.name, bal))
 
-            if code_int < 1500:
-                aset_lancar_rows.append((acc.name, bal))
-            else:
-                aset_tetap_rows.append((acc.name, bal))
-
+        # Hitung total aset
         total_aset_lancar = sum(x[1] for x in aset_lancar_rows)
         total_aset_tetap = sum(x[1] for x in aset_tetap_rows)
         total_aktiva = total_aset_lancar + total_aset_tetap
 
-        # Tabel Aktiva
-        st.write("Aktiva")
-        aktiva_tabel = []
+        # Hitung total liabilitas
+        total_liab_jangka_pendek = sum(x[1] for x in liab_jangka_pendek_rows)
+        total_liab_jangka_panjang = sum(x[1] for x in liab_jangka_panjang_rows)
+        total_liabilitas = total_liab_jangka_pendek + total_liab_jangka_panjang
 
-        aktiva_tabel.append({"Transaksi": "Aset Lancar", "Nominal": ""})
-        for name, bal in aset_lancar_rows:
-            aktiva_tabel.append({"Transaksi": name, "Nominal": f"{bal:,.2f}"})
-        aktiva_tabel.append({"Transaksi": "Jumlah Aset Lancar", "Nominal": f"{total_aset_lancar:,.2f}"})
+        # Total pasiva = liabilitas + modal akhir
+        total_pasiva = total_liabilitas + modal_akhir
 
-        aktiva_tabel.append({"Transaksi": "Aset Tetap", "Nominal": ""})
-        for name, bal in aset_tetap_rows:
-            aktiva_tabel.append({"Transaksi": name, "Nominal": f"{bal:,.2f}"})
-        aktiva_tabel.append({"Transaksi": "Jumlah Aset Tetap", "Nominal": f"{total_aset_tetap:,.2f}"})
+        # Tampilkan Neraca dalam 2 kolom
+        col1, col2 = st.columns(2)
 
-        aktiva_tabel.append({"Transaksi": "Total Aktiva", "Nominal": f"{total_aktiva:,.2f}"})
+        with col1:
+            st.write("**AKTIVA**")
+            aktiva_tabel = []
 
-        df_aktiva = pd.DataFrame(aktiva_tabel)
-        df_aktiva_no_index = df_aktiva.set_index("Transaksi")
-        st.table(df_aktiva_no_index)
+            if aset_lancar_rows:
+                aktiva_tabel.append({"Transaksi": "**Aset Lancar**", "Nominal": ""})
+                for name, bal in aset_lancar_rows:
+                    aktiva_tabel.append({"Transaksi": name, "Nominal": format_rupiah(bal)})
+                aktiva_tabel.append({"Transaksi": "**Total Aset Lancar**", "Nominal": format_rupiah(total_aset_lancar)})
+                aktiva_tabel.append({"Transaksi": "", "Nominal": ""})
 
-        # Pasiva: Liabilitas + Modal Akhir
-        liab_rows = []
-        for acc in accounts:
-            if acc.account_type == "liability":
-                bal = account_balances.get(acc.id, 0.0)
-                liab_rows.append((acc.name, bal))
+            if aset_tetap_rows:
+                aktiva_tabel.append({"Transaksi": "**Aset Tetap**", "Nominal": ""})
+                for name, bal in aset_tetap_rows:
+                    aktiva_tabel.append({"Transaksi": name, "Nominal": format_rupiah(bal)})
+                aktiva_tabel.append({"Transaksi": "**Total Aset Tetap**", "Nominal": format_rupiah(total_aset_tetap)})
+                aktiva_tabel.append({"Transaksi": "", "Nominal": ""})
 
-        total_liab = sum(x[1] for x in liab_rows)
-        total_pasiva = total_liab + modal_akhir
+            aktiva_tabel.append({"Transaksi": "**TOTAL AKTIVA**", "Nominal": format_rupiah(total_aktiva)})
 
-        st.write("Pasiva")
-        pasiva_tabel = []
-        pasiva_tabel.append({"Transaksi": "Liabilitas", "Nominal": ""})
-        for name, bal in liab_rows:
-            pasiva_tabel.append({"Transaksi": name, "Nominal": f"{bal:,.2f}"})
-        pasiva_tabel.append({"Transaksi": "Jumlah Liabilitas", "Nominal": f"{total_liab:,.2f}"})
+            if aktiva_tabel:
+                df_aktiva = pd.DataFrame(aktiva_tabel)
+                df_aktiva_no_index = df_aktiva.set_index("Transaksi")
+                st.table(df_aktiva_no_index)
+            else:
+                st.info("Belum ada data aktiva")
 
-        pasiva_tabel.append({"Transaksi": "Modal Akhir", "Nominal": ""})
-        pasiva_tabel.append({"Transaksi": "Modal Akhir", "Nominal": f"{modal_akhir:,.2f}"})
-        pasiva_tabel.append({"Transaksi": "Total Pasiva", "Nominal": f"{total_pasiva:,.2f}"})
+        with col2:
+            st.write("**PASIVA**")
+            pasiva_tabel = []
 
-        df_pasiva = pd.DataFrame(pasiva_tabel)
-        df_pasiva_no_index = df_pasiva.set_index("Transaksi")
-        st.table(df_pasiva_no_index)
+            if liab_jangka_pendek_rows:
+                pasiva_tabel.append({"Transaksi": "**Liabilitas Jangka Pendek**", "Nominal": ""})
+                for name, bal in liab_jangka_pendek_rows:
+                    pasiva_tabel.append({"Transaksi": name, "Nominal": format_rupiah(bal)})
+                pasiva_tabel.append({"Transaksi": "**Total Liabilitas Jangka Pendek**", "Nominal": format_rupiah(total_liab_jangka_pendek)})
+                pasiva_tabel.append({"Transaksi": "", "Nominal": ""})
+
+            if liab_jangka_panjang_rows:
+                pasiva_tabel.append({"Transaksi": "**Liabilitas Jangka Panjang**", "Nominal": ""})
+                for name, bal in liab_jangka_panjang_rows:
+                    pasiva_tabel.append({"Transaksi": name, "Nominal": format_rupiah(bal)})
+                pasiva_tabel.append({"Transaksi": "**Total Liabilitas Jangka Panjang**", "Nominal": format_rupiah(total_liab_jangka_panjang)})
+                pasiva_tabel.append({"Transaksi": "", "Nominal": ""})
+
+            pasiva_tabel.append({"Transaksi": "**Total Liabilitas**", "Nominal": format_rupiah(total_liabilitas)})
+            pasiva_tabel.append({"Transaksi": "", "Nominal": ""})
+            pasiva_tabel.append({"Transaksi": "**Modal Akhir**", "Nominal": format_rupiah(modal_akhir)})
+            pasiva_tabel.append({"Transaksi": "", "Nominal": ""})
+            pasiva_tabel.append({"Transaksi": "**TOTAL PASIVA**", "Nominal": format_rupiah(total_pasiva)})
+
+            if pasiva_tabel:
+                df_pasiva = pd.DataFrame(pasiva_tabel)
+                df_pasiva_no_index = df_pasiva.set_index("Transaksi")
+                st.table(df_pasiva_no_index)
+            else:
+                st.info("Belum ada data pasiva")
+
+        # Cek keseimbangan neraca
+        st.markdown("---")
+        if abs(total_aktiva - total_pasiva) < 0.001:
+            st.success("✅ Neraca Balance: Total Aktiva = Total Pasiva")
+        else:
+            st.error(f"❌ Neraca Tidak Balance: Aktiva {format_rupiah(total_aktiva)} vs Pasiva {format_rupiah(total_pasiva)}")
 
 
 def page_accounts():
@@ -1098,7 +1281,6 @@ def page_accounts():
 
         rows = [
             {
-                "ID": a.id,
                 "Kode": a.code,
                 "Nama": a.name,
                 "Tipe": a.account_type,
@@ -1302,7 +1484,7 @@ def page_close_year():
 # ============================================================
 
 def main():
-    st.set_page_config(page_title="D’Pongs Wisata Keluarga", layout="wide")
+    st.set_page_config(page_title="Akuntansi Streamlit", layout="wide")
 
     if "user" not in st.session_state:
         st.session_state["user"] = None
